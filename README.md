@@ -18,7 +18,8 @@ An improved, modernized server benchmark — the spiritual successor to the clas
   - Ping latency **and jitter** to Cloudflare, Google, Quad9, OpenDNS
   - DNS resolution timings via `dig`
   - HTTP fetch timings to Google / GitHub / Cloudflare
-  - speedtest-cli throughput
+  - **Built-in speedtest** via `curl` (downloads from Cloudflare / Hetzner / CacheFly,
+    uploads to Cloudflare) — no `speedtest-cli` required
 - **Reports**: `--json out.json`, `--html out.html`, `--share` to bashupload
 - **Composite score** so you can compare boxes at a glance
 - **Spinner**, colors, sane fallbacks, idempotent, no apt-installing of anything
@@ -55,13 +56,13 @@ chmod +x bench.sh
 
 ```bash
 # Debian / Ubuntu
-sudo apt-get install -y sysbench fio speedtest-cli dnsutils smartmontools zstd lz4 lm-sensors
+sudo apt-get install -y sysbench fio dnsutils smartmontools zstd lz4 lm-sensors
 
 # RHEL / Fedora
-sudo dnf install -y sysbench fio speedtest-cli bind-utils smartmontools zstd lz4 lm_sensors
+sudo dnf install -y sysbench fio bind-utils smartmontools zstd lz4 lm_sensors
 
 # Alpine
-sudo apk add sysbench fio speedtest-cli bind-tools smartmontools zstd lz4 lm-sensors bash
+sudo apk add sysbench fio bind-tools smartmontools zstd lz4 lm-sensors bash
 ```
 
 Each missing tool just causes its section to fall back or be skipped.

@@ -440,25 +440,89 @@ if [ "$NO_NET" -eq 0 ]; then
             printf '    %-32s %s%6s ms%s\n' "$url" "$C_GREEN" "$T_MS" "$C_RESET"
         done
 
-        # Speedtest
-        printf '\n  %sSpeedtest:%s\n' "$C_BOLD" "$C_RESET"
-        if has speedtest-cli || has speedtest; then
-            ST_BIN=$(command -v speedtest-cli || command -v speedtest)
-            spin_start "speedtest running (this can take ~30s)…"
-            ST_OUT=$("$ST_BIN" --simple 2>/dev/null || true)
+        # ---------- Built-in speedtest (no external CLI needed) ----------
+        printf '\n  %sSpeedtest (curl-based, no external CLI):%s\n' "$C_BOLD" "$C_RESET"
+
+        # Convert bytes-per-second → Mbit/s (1 Mbit = 10^6 bits)
+        bps_to_mbits() { awk -v b="$1" 'BEGIN{ if(b>0) printf "%.2f", (b*8)/1000000; else print "0.00" }'; }
+
+        # Download test: fetch a known-size payload, measure time, derive throughput.
+        # endpoints chosen for global anycast + reliability. size auto-picked.
+        DOWN_BEST=0
+        DOWN_BEST_LOC=""
+        for entry in \
+            "Cloudflare (global anycast)|https://speed.cloudflare.com/__down?bytes=104857600|100" \
+            "Hetzner (Falkenstein, DE)|https://nbg1-speed.hetzner.com/100MB.bin|100" \
+            "CacheFly (multi-region)|https://cachefly.cachefly.net/100mb.test|100"
+        do
+            NAME="${entry%%|*}"; rest="${entry#*|}"
+            URL="${rest%%|*}";   SIZE_MB="${rest##*|}"
+            spin_start "↓ downloading ${SIZE_MB}MB from $NAME …"
+            # curl reports total bytes downloaded and time used. timeout caps stalled servers.
+            OUT=$(curl -fsS --max-time 30 -o /dev/null \
+                  -w '%{size_download} %{time_total} %{speed_download}\n' \
+                  "$URL" 2>/dev/null || true)
             spin_stop
-            if [ -n "$ST_OUT" ]; then
-                echo "$ST_OUT" | sed "s/^/    ${C_GREEN}↯${C_RESET} /"
-                DOWN=$(echo "$ST_OUT" | awk '/Download/{print $2}')
-                UP=$(echo "$ST_OUT"   | awk '/Upload/{print $2}')
-                j_str speedtest_download "${DOWN} Mbit/s"
-                j_str speedtest_upload   "${UP} Mbit/s"
-            else
-                warn "speedtest failed"
+            if [ -z "$OUT" ]; then
+                printf '    %-30s %s%s%s\n' "$NAME" "$C_YELLOW" "failed" "$C_RESET"
+                continue
             fi
-        else
-            warn "speedtest-cli not installed — use --quick to skip, or:"
-            note "  apt install speedtest-cli   #  pip install speedtest-cli"
+            BYTES=$(echo "$OUT" | awk '{print $1}')
+            SECS=$(echo "$OUT"  | awk '{print $2}')
+            BPS=$(echo "$OUT"   | awk '{print $3}')
+            # If <1 MB came back, treat as failed (often an error page returned with 200).
+            if [ "${BYTES:-0}" -lt 1000000 ]; then
+                printf '    %-30s %s%s%s\n' "$NAME" "$C_YELLOW" "stalled / small payload" "$C_RESET"
+                continue
+            fi
+            MBITS=$(bps_to_mbits "$BPS")
+            MIB=$(awk -v b="$BYTES" 'BEGIN{ printf "%.1f", b/1048576 }')
+            printf '    %-30s %s↓ %7s Mbit/s%s   (%s MiB in %ss)\n' \
+                "$NAME" "$C_GREEN" "$MBITS" "$C_RESET" "$MIB" "$SECS"
+            # Track best (highest Mbit/s)
+            IS_BEST=$(awk -v a="$MBITS" -v b="$DOWN_BEST" 'BEGIN{ print (a>b)?1:0 }')
+            if [ "$IS_BEST" = "1" ]; then
+                DOWN_BEST="$MBITS"
+                DOWN_BEST_LOC="$NAME"
+            fi
+            j_str "speedtest_down_${NAME// /_}" "${MBITS} Mbit/s"
+        done
+
+        # Upload test against Cloudflare's /__up endpoint (accepts arbitrary bytes).
+        UP_MBITS=""
+        if has dd; then
+            UPFILE=$(mktemp)
+            # 25 MiB random data — small enough not to take forever, big enough to be representative.
+            dd if=/dev/urandom of="$UPFILE" bs=1M count=25 status=none 2>/dev/null
+            spin_start "↑ uploading 25MB to Cloudflare…"
+            UP_OUT=$(curl -fsS --max-time 30 -o /dev/null \
+                  -w '%{size_upload} %{time_total} %{speed_upload}\n' \
+                  -X POST -H 'Content-Type: application/octet-stream' \
+                  --data-binary "@$UPFILE" \
+                  "https://speed.cloudflare.com/__up" 2>/dev/null || true)
+            spin_stop
+            rm -f "$UPFILE"
+            if [ -n "$UP_OUT" ]; then
+                UBYTES=$(echo "$UP_OUT" | awk '{print $1}')
+                UBPS=$(echo "$UP_OUT"   | awk '{print $3}')
+                if [ "${UBYTES:-0}" -gt 1000000 ]; then
+                    UP_MBITS=$(bps_to_mbits "$UBPS")
+                    printf '    %-30s %s↑ %7s Mbit/s%s\n' \
+                        "Cloudflare upload" "$C_GREEN" "$UP_MBITS" "$C_RESET"
+                fi
+            fi
+            [ -z "$UP_MBITS" ] && printf '    %-30s %s%s%s\n' "Cloudflare upload" "$C_YELLOW" "failed" "$C_RESET"
+        fi
+
+        # Summary
+        if [ -n "$DOWN_BEST_LOC" ]; then
+            printf '\n    %sBest down:%s %s%s Mbit/s%s  (%s)%s   %sUp:%s %s%s Mbit/s%s\n' \
+                "$C_BOLD" "$C_RESET" \
+                "$C_BOLD" "$DOWN_BEST" "$C_RESET" "$DOWN_BEST_LOC" "$C_RESET" \
+                "$C_BOLD" "$C_RESET" \
+                "$C_BOLD" "${UP_MBITS:-n/a}" "$C_RESET"
+            j_str speedtest_best_down "${DOWN_BEST} Mbit/s (${DOWN_BEST_LOC})"
+            j_str speedtest_up "${UP_MBITS:-n/a} Mbit/s"
         fi
     else
         warn "Quick mode: skipping latency / DNS / speedtest"
