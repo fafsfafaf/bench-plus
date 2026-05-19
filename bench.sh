@@ -405,14 +405,42 @@ if [ "$NO_NET" -eq 0 ]; then
     j_str asn_org "$ASN_ORG"; j_str location "$ASN_LOC"
 
     if [ "$QUICK" -eq 0 ]; then
-        # Latency to global anycast DNS
+        # Latency to global anycast DNS — tries ICMP ping first,
+        # falls back to TCP connect timing (works in restricted containers).
         printf '\n  %sLatency (avg / jitter):%s\n' "$C_BOLD" "$C_RESET"
+
+        # Detect if ICMP is usable at all (containers without CAP_NET_RAW can't ping)
+        PING_OK=0
+        if ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1; then
+            PING_OK=1
+        else
+            note "ICMP blocked (common in Docker) — using TCP connect timing on port 443"
+        fi
+
         for target in "1.1.1.1:Cloudflare" "8.8.8.8:Google" "9.9.9.9:Quad9" "208.67.222.222:OpenDNS"; do
             host="${target%%:*}"; name="${target##*:}"
-            PING_OUT=$(ping -c 5 -W 2 "$host" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/{print $5, $7}')
-            if [ -n "$PING_OUT" ]; then
-                AVG=$(echo "$PING_OUT" | awk '{print $1}')
-                JIT=$(echo "$PING_OUT" | awk '{print $2}')
+            AVG=""; JIT=""
+            if [ "$PING_OK" -eq 1 ]; then
+                PING_OUT=$(ping -c 5 -W 2 "$host" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/{print $5, $7}')
+                if [ -n "$PING_OUT" ]; then
+                    AVG=$(echo "$PING_OUT" | awk '{print $1}')
+                    JIT=$(echo "$PING_OUT" | awk '{print $2}')
+                fi
+            fi
+            # TCP fallback via curl --connect-timeout against 443
+            if [ -z "$AVG" ] && has curl; then
+                samples=""
+                for i in 1 2 3 4 5; do
+                    T=$(curl -o /dev/null -s -w '%{time_connect}\n' --connect-timeout 2 \
+                        --max-time 3 "https://${host}/" 2>/dev/null)
+                    [ -n "$T" ] && [ "$T" != "0.000000" ] && samples="$samples $T"
+                done
+                if [ -n "$samples" ]; then
+                    AVG=$(echo "$samples" | awk '{ s=0; n=0; for(i=1;i<=NF;i++){s+=$i; n++} if(n>0) printf "%.1f", (s/n)*1000 }')
+                    JIT=$(echo "$samples" | awk -v a="$AVG" '{ s=0; n=0; for(i=1;i<=NF;i++){ d=($i*1000-a); s+=d*d; n++ } if(n>0) printf "%.1f", sqrt(s/n) }')
+                fi
+            fi
+            if [ -n "$AVG" ]; then
                 printf '    %-22s %s%6s ms%s ± %s ms\n' "$name" "$C_GREEN" "$AVG" "$C_RESET" "${JIT:-?}"
             else
                 printf '    %-22s %s%s%s\n' "$name" "$C_YELLOW" "timeout" "$C_RESET"
